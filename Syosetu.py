@@ -4,8 +4,14 @@ import requests
 from bs4 import BeautifulSoup
 from multiprocessing.dummy import Pool as tp
 import os
+import sys
 from ebooklib import epub
 import base64
+import queue
+import yaml
+import asyncio
+import re
+import time
 
 pool = tp(processes=16)
 dirn = os.getcwd()
@@ -44,109 +50,151 @@ def makehtml(i):
     html = '<html>\n<head>\n' + '<title>' + tit + '</title>\n</head>\n<body>\n<div>\n<h3>' + tit + '</h3>\n' + con + '</div>\n</body>\n</html>'
     return (tit, html)
 
+retry_queue = queue.Queue()
 
-syoid = input('Enter Novel ID of the novel: ')
-menupage = getpage('http://ncode.syosetu.com/' + syoid + '/')
-firstpage = getpage('http://ncode.syosetu.com/' + syoid + '/1/')
-author = menupage.find('div', class_="novel_writername").get_text().split('：')[-1]
-pagenum = int(firstpage.find('div', id='novel_no').get_text().split('/')[-1])
-maintitle = menupage.find('title').get_text().split(' - ')[0]
-about = menupage.find("div", id="novel_ex").prettify()
-print('Started. Title: ' + maintitle)
-if menupage.find('div', class_="chapter_title") is None:
-    worklist = [(str(i), 'http://ncode.syosetu.com/' + syoid + '/' + str(i) + '/') for i in range(1, pagenum + 1)]
-    plist = pool.map(getpage2, worklist)
-    hl = []
-    for j in plist:
-        hl.append((j[0], makehtml(j[1])))
-    book = epub.EpubBook()
-    book.set_identifier(syoid)
-    book.set_title(maintitle)
-    book.set_language('jp')
-    book.add_author(author)
-    sabout = '<html>\n<head>\n<title>小説紹介</title>\n</head>\n<body>\n<div>\n<h3>小説紹介</h3>\n' + about + '</div>\n</body>\n</html>'
-    cabout = epub.EpubHtml(title='About', file_name='0.xhtml', content=sabout, lang='ja_jp')
-    book.add_item(cabout)
-    conlist = [epub.EpubHtml(title=i[1][0], file_name=i[0] + '.xhtml', content=i[1][1], lang='ja_jp') for i in hl]
-    for i in conlist:
-        book.add_item(i)
-    contuple = conlist
-    contuple.insert(0, 'cabout')
-    contuple = tuple(contuple)
-    book.toc = (epub.Link('0.xhtml', '小説紹介', 'intro'), (epub.Section('目録：'), contuple))
-    book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
-    dstyle = str(base64.b64decode(style))
-    css = epub.EpubItem(uid="style_nav", file_name="style/nav.css", media_type="text/css", content=dstyle)
-    book.add_item(css)
-    book.spine = ['nav'] + conlist
-    epub.write_epub(dirn + '\\' + maintitle + '.epub', book, {})
-    print('Succeed.')
-else:
-    book = epub.EpubBook()
-    book.set_identifier(syoid)
-    book.set_title(maintitle)
-    book.set_language('jp')
-    book.add_author(author)
-    sabout = '<html>\n<head>\n<title>小説紹介</title>\n</head>\n<body>\n<div>\n<h3>小説紹介</h3>\n' + about + '</div>\n</body>\n</html>'
-    cabout = epub.EpubHtml(title='About', file_name='0.xhtml', content=sabout, lang='ja_jp')
-    catalog = menupage.find('div', class_='index_box').find_all(["div", "dd"], class_=['chapter_title', 'subtitle'])
-    book.add_item(cabout)
-    worklist = [[]]
-    j = 0
-    for i in catalog:
-        if i.name == 'div':
-            worklist.append([i.get_text(), []])
-            j += 1
-        if i.name == 'dd':
-            if j == 0:
-                num = i.find('a')['href'].split('/')[-2]
-                worklist[0].append((num, 'http://ncode.syosetu.com/' + syoid + '/' + num + '/'))
-            else:
-                num = i.find('a')['href'].split('/')[-2]
-                worklist[j][1].append((num, 'http://ncode.syosetu.com/' + syoid + '/' + num + '/'))
-    pagelist = [cabout]
-    numlist = []
-    for k in range(len(worklist)):
-        i = worklist[k]
-        if k == 0 and len(i) != 0:
-            plist = pool.map(getpage2, i)
-            hl = []
-            for j in range(len(plist)):
-                h = makehtml(plist[j][1])
-                num = str(k) + ' - ' + str(j + 1)
-                pag = epub.EpubHtml(h[0], file_name=num + '.xhtml', content=h[1], lang='ja_jp')
-                book.add_item(pag)
-                pagelist.append(pag)
-                hl.append((h[0], num))
-            numlist.append(hl)
-        elif k == 0 and len(i) == 0:
-            numlist.append([])
-            pass
-        elif isinstance(i[1], list):
-            plist = pool.map(getpage2, i[1])
-            hl = []
-            for j in range(len(plist)):
-                num = str(k) + ' - ' + str(j + 1)
-                h = makehtml(plist[j][1])
-                pag = epub.EpubHtml(h[0], file_name=num + '.xhtml', content=h[1], lang='ja_jp')
-                book.add_item(pag)
-                pagelist.append(pag)
-                hl.append((h[0], num))
-            numlist.append([i[0], hl])
-    toclist = [epub.Link('0.xhtml', '小説紹介', 'intro')]
-    if numlist[0] != []:
-        for i in numlist[0]:
-            toclist.append(epub.Link(i[1] + '.xhtml', i[0], i[1]))
-    for i in numlist[1:]:
-        intuple = tuple([epub.Link(j[1] + '.xhtml', j[0], j[1]) for j in i[1]])
-        toclist.append((epub.Section(i[0]), intuple))
-    book.toc = tuple(toclist)
-    book.add_item(epub.EpubNcx())
-    book.add_item(epub.EpubNav())
-    dstyle = str(base64.b64decode(style))
-    css = epub.EpubItem(uid="style_nav", file_name="style/nav.css", media_type="text/css", content=dstyle)
-    book.add_item(css)
-    book.spine = ['nav'] + pagelist
-    epub.write_epub(dirn + '\\' + maintitle + '.epub', book, {})
-    print('Succeed.')
+async def main(ncode=None, url=None):
+    if ncode is None and url is None:
+        syoid = input('Enter Novel ID of the novel: ')
+    else:
+        syoid = ncode or re.match("https://ncode.syosetu.com/([a-z0-9]+)", url).groups()[-1]
+    menupage = getpage('http://ncode.syosetu.com/' + syoid + '/')
+    firstpage = getpage('http://ncode.syosetu.com/' + syoid + '/1/')
+    author = menupage.find('div', class_="novel_writername").get_text().split('：')[-1]
+    pagenum = int(firstpage.find('div', id='novel_no').get_text().split('/')[-1])
+    maintitle = menupage.find('title').get_text().split(' - ')[0]
+    about = menupage.find("div", id="novel_ex").prettify()
+    print('Started. Title: ' + maintitle)
+    if menupage.find('div', class_="chapter_title") is None:
+        worklist = [(str(i), 'http://ncode.syosetu.com/' + syoid + '/' + str(i) + '/') for i in range(1, pagenum + 1)]
+        for url in worklist: retry_queue.pu(url)
+        plist = []
+        while not retry_queue.empty():
+            url = retry_queue.get()
+            try:
+                res = getpage2(url)
+            except Exception as e:
+                print("waiting for 5 secs for {}".format(str(e)))
+                retry_queue.put(url)
+                asyncio.sleep(5)
+            plist.append(res)
+        #plist = pool.map(getpage2, worklist)
+        hl = []
+        for j in plist:
+            hl.append((j[0], makehtml(j[1])))
+        book = epub.EpubBook()
+        book.set_identifier(syoid)
+        book.set_title(maintitle)
+        book.set_language('jp')
+        book.add_author(author)
+        sabout = '<html>\n<head>\n<title>小説紹介</title>\n</head>\n<body>\n<div>\n<h3>小説紹介</h3>\n' + about + '</div>\n</body>\n</html>'
+        cabout = epub.EpubHtml(title='About', file_name='0.xhtml', content=sabout, lang='ja_jp')
+        book.add_item(cabout)
+        conlist = [epub.EpubHtml(title=i[1][0], file_name=i[0] + '.xhtml', content=i[1][1], lang='ja_jp') for i in hl]
+        for i in conlist:
+            book.add_item(i)
+        contuple = conlist
+        contuple.insert(0, 'cabout')
+        contuple = tuple(contuple)
+        book.toc = (epub.Link('0.xhtml', '小説紹介', 'intro'), (epub.Section('目録：'), contuple))
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        dstyle = str(base64.b64decode(style))
+        css = epub.EpubItem(uid="style_nav", file_name="style/nav.css", media_type="text/css", content=dstyle)
+        book.add_item(css)
+        book.spine = ['nav'] + conlist
+        epub.write_epub(dirn + '\\' + maintitle + '.epub', book, {})
+        print('Succeed.')
+    else:
+        book = epub.EpubBook()
+        book.set_identifier(syoid)
+        book.set_title(maintitle)
+        book.set_language('jp')
+        book.add_author(author)
+        sabout = '<html>\n<head>\n<title>小説紹介</title>\n</head>\n<body>\n<div>\n<h3>小説紹介</h3>\n' + about + '</div>\n</body>\n</html>'
+        cabout = epub.EpubHtml(title='About', file_name='0.xhtml', content=sabout, lang='ja_jp')
+        catalog = menupage.find('div', class_='index_box').find_all(["div", "dd"], class_=['chapter_title', 'subtitle'])
+        book.add_item(cabout)
+        worklist = [[]]
+        j = 0
+        for i in catalog:
+            if i.name == 'div':
+                worklist.append([i.get_text(), []])
+                j += 1
+            if i.name == 'dd':
+                if j == 0:
+                    num = i.find('a')['href'].split('/')[-2]
+                    worklist[0].append((num, 'http://ncode.syosetu.com/' + syoid + '/' + num + '/'))
+                else:
+                    num = i.find('a')['href'].split('/')[-2]
+                    worklist[j][1].append((num, 'http://ncode.syosetu.com/' + syoid + '/' + num + '/'))
+        pagelist = [cabout]
+        numlist = []
+        for k in range(len(worklist)):
+            i = worklist[k]
+            if k == 0 and len(i) != 0:
+                print(yaml.dump(i))
+                continue
+                plist = pool.map(getpage2, i)
+                hl = []
+                for j in range(len(plist)):
+                    h = makehtml(plist[j][1])
+                    num = str(k) + ' - ' + str(j + 1)
+                    pag = epub.EpubHtml(h[0], file_name=num + '.xhtml', content=h[1], lang='ja_jp')
+                    book.add_item(pag)
+                    pagelist.append(pag)
+                    hl.append((h[0], num))
+                numlist.append(hl)
+            elif k == 0 and len(i) == 0:
+                numlist.append([])
+                pass
+            elif isinstance(i[1], list):
+                for url in i[1]: retry_queue.put(url)
+                plist = []
+                while not retry_queue.empty():
+                    url = retry_queue.get()
+                    while True:
+                        try:
+                            res = getpage2(url)
+                        except Exception as e:
+                            print("waiting for 5 secs for {}".format(str(e)))
+                            retry_queue.put(url)
+                            asyncio.sleep(5)
+                            continue
+                        break
+                    plist.append(res)
+                    asyncio.sleep(0.3)
+                #plist = pool.map(getpage2, i[1])
+                hl = []
+                for j in range(len(plist)):
+                    num = str(k) + ' - ' + str(j + 1)
+                    h = makehtml(plist[j][1])
+                    pag = epub.EpubHtml(h[0], file_name=num + '.xhtml', content=h[1], lang='ja_jp')
+                    book.add_item(pag)
+                    pagelist.append(pag)
+                    hl.append((h[0], num))
+                numlist.append([i[0], hl])
+        toclist = [epub.Link('0.xhtml', '小説紹介', 'intro')]
+        if numlist[0] != []:
+            for i in numlist[0]:
+                toclist.append(epub.Link(i[1] + '.xhtml', i[0], i[1]))
+        for i in numlist[1:]:
+            intuple = tuple([epub.Link(j[1] + '.xhtml', j[0], j[1]) for j in i[1]])
+            toclist.append((epub.Section(i[0]), intuple))
+        book.toc = tuple(toclist)
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+        dstyle = str(base64.b64decode(style))
+        css = epub.EpubItem(uid="style_nav", file_name="style/nav.css", media_type="text/css", content=dstyle)
+        book.add_item(css)
+        book.spine = ['nav'] + pagelist
+        epub.write_epub(dirn + '/' + maintitle + '.epub', book, {})
+        print('Succeed.')
+
+def args():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ncode", help="ncode of syosetsu")
+    parser.add_argument("--url", help="url of syosetsu") 
+    return parser.parse_args()
+
+asyncio.get_event_loop().run_until_complete(main(ncode=args().ncode, url=args().url))
